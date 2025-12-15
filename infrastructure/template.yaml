@@ -1,22 +1,19 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: Multi-Environment EC2 Deployment Demo with Self-Contained VPC
+Description: Multi-Environment EC2 Deployment with CI-safe signaling
 
 # ---------------- PARAMETERS ----------------
 Parameters:
   EnvironmentName:
     Type: String
-    Description: Environment name
-    AllowedValues:
-      - Dev
-      - Prod
+    AllowedValues: [Dev, Prod]
 
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
-    Description: Existing EC2 KeyPair name (required)
+    Description: Existing EC2 KeyPair
 
   LatestAMIId:
-    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+    Type: AWS::EC2::Image::Id
+    Default: ami-0fffffffffffffff # ignored in Dev, overridden in Prod
 
 # ---------------- CONDITIONS ----------------
 Conditions:
@@ -25,7 +22,7 @@ Conditions:
 # ---------------- RESOURCES ----------------
 Resources:
 
-  # -------- VPC --------
+  # ---------- NETWORK ----------
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -38,10 +35,6 @@ Resources:
 
   InternetGateway:
     Type: AWS::EC2::InternetGateway
-    Properties:
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-IGW
 
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -49,25 +42,17 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
-  # -------- SUBNET --------
   PublicSubnet:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.1.0/24
       MapPublicIpOnLaunch: true
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-PublicSubnet
 
-  # -------- ROUTING --------
   RouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-RT
 
   InternetRoute:
     Type: AWS::EC2::Route
@@ -83,11 +68,11 @@ Resources:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref RouteTable
 
-  # -------- SECURITY GROUP --------
+  # ---------- SECURITY ----------
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub ${EnvironmentName} EC2 security group
+      GroupDescription: App SG
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -98,54 +83,60 @@ Resources:
           FromPort: 3000
           ToPort: 3000
           CidrIp: 0.0.0.0/0
-      Tags:
-        - Key: Name
-          Value: !Sub ${EnvironmentName}-SG
 
-  # -------- EC2 INSTANCE --------
+  # ---------- EC2 ----------
   EC2Instance:
     Type: AWS::EC2::Instance
+
+    # 🔥 CRITICAL FOR CI
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+
     Properties:
-      ImageId: !Ref LatestAMIId
+      ImageId: !If
+        - IsProduction
+        - !Ref LatestAMIId
+        - !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}"
+
       InstanceType: !If [IsProduction, t3.medium, t2.micro]
       KeyName: !Ref KeyName
       SubnetId: !Ref PublicSubnet
       SecurityGroupIds:
         - !Ref InstanceSecurityGroup
-      UserData:
-        Fn::Base64: |
-          #!/bin/bash
-          # 1. Ensure all system components are up-to-date
-          yum update -y
 
-          # 2. Install Node.js, Git, and dependencies
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+
+          yum update -y
+          yum install -y aws-cfn-bootstrap git
+
           curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
-          # The previous step sets up the repo; we still need to run yum install
-          yum install -y nodejs git
-          
-          # 3. Clone and install the application
-          APP_DIR="/home/ec2-user/app"
-          
-          # IMPORTANT: Replace YOUR_GITHUB_USER/YOUR_REPO.git with your actual public repo
-          git clone https://github.com/AzizBenMallouk/demo-workflow.git $APP_DIR 
-          
-          # Change ownership to the standard ec2-user
-          chown -R ec2-user:ec2-user $APP_DIR
-          
-          # 4. Run app setup as the ec2-user
-          # Use 'su - ec2-user -c "..."' to switch user and run commands
-          su - ec2-user -c "
-            cd $APP_DIR
-            npm install
-            # Start the app using nohup
-            nohup node index.js > /var/log/app.log 2>&1 &
-          "
-          echo "Application setup complete."
+          yum install -y nodejs
+
+          mkdir -p /home/ec2-user/app
+          cd /home/ec2-user/app
+
+          git clone https://github.com/YOUR_GITHUB_USER/YOUR_REPO.git .
+
+          npm install --production
+
+          nohup node index.js > /var/log/app.log 2>&1 &
+
+          # 🔥 SIGNAL CLOUDFORMATION (REQUIRED)
+          /opt/aws/bin/cfn-signal \
+            --exit-code $? \
+            --stack ${AWS::StackName} \
+            --resource EC2Instance \
+            --region ${AWS::Region}
+
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-App-Server
 
-  # -------- CLOUDWATCH ALARM (PROD ONLY) --------
+  # ---------- MONITORING (PROD ONLY) ----------
   HighCPUAlarm:
     Type: AWS::CloudWatch::Alarm
     Condition: IsProduction
@@ -158,9 +149,6 @@ Resources:
       EvaluationPeriods: 2
       Threshold: 80
       ComparisonOperator: GreaterThanThreshold
-      ActionsEnabled: true
-      AlarmActions:
-        - arn:aws:sns:REGION:ACCOUNT_ID:AlarmTopic
       Dimensions:
         - Name: InstanceId
           Value: !Ref EC2Instance
@@ -168,9 +156,7 @@ Resources:
 # ---------------- OUTPUTS ----------------
 Outputs:
   InstanceId:
-    Description: EC2 Instance ID
     Value: !Ref EC2Instance
 
   InstancePublicIP:
-    Description: Public IP address
     Value: !GetAtt EC2Instance.PublicIp
