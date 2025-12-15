@@ -20,7 +20,7 @@ Conditions:
   EnableMonitoring: !If [IsProduction, "true", "false"]
 
 # --- Resources Section ---
-
+Resources:
   # --- 1. Networking (New VPC for the stack) ---
   VPC:
     Type: AWS::EC2::VPC
