@@ -1,0 +1,156 @@
+# .github/workflows/main.yml
+name: Deploy Multi-Environment App to AWS
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+
+jobs:
+  # --- 1. Deploy to Dev Environment (Source for AMI) ---
+  deploy-dev:
+    name: Deploy to Dev
+    if: github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+          
+      - name: Deploy DEV Stack
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        id: cfn_deploy_dev
+        with:
+          name: Demo-App-Dev-Stack
+          template: infrastructure/template.yaml
+          parameter-overrides: |
+            EnvironmentName=Dev,
+            KeyName=${{ secrets.EC2_KEY_NAME }} # IMPORTANT: Use a secret for your KeyPair name
+          capabilities: CAPABILITY_NAMED_IAM
+
+      - name: Get Dev Instance ID
+        id: get_instance_id
+        run: |
+          # Retrieve the InstanceId output from the Dev stack
+          INSTANCE_ID=$(aws cloudformation describe-stacks \
+            --stack-name Demo-App-Dev-Stack \
+            --query "Stacks[0].Outputs[?OutputKey=='InstanceId'].OutputValue" \
+            --output text)
+          
+          if [ -z "$INSTANCE_ID" ]; then
+            echo "Error: Could not retrieve Dev Instance ID."
+            exit 1
+          fi
+          echo "::set-output name=dev_instance_id::$INSTANCE_ID"
+    outputs:
+      dev_instance_id: ${{ steps.get_instance_id.outputs.dev_instance_id }}
+
+  # --- 2. Create AMI and Promote (Quality Gate) ---
+  create-ami-and-promote:
+    name: Create AMI
+    needs: deploy-dev
+    if: success() && github.ref == 'refs/heads/dev'
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Create AMI from Dev Instance
+        id: create_ami
+        run: |
+          DEV_INSTANCE_ID="${{ needs.deploy-dev.outputs.dev_instance_id }}"
+          AMI_NAME="Prod-Ready-App-${GITHUB_SHA}"
+          
+          echo "Creating AMI '$AMI_NAME' from Dev Instance $DEV_INSTANCE_ID..."
+          
+          # Use AWS CLI to create the AMI
+          AMI_ID=$(aws ec2 create-image \
+            --instance-id "$DEV_INSTANCE_ID" \
+            --name "$AMI_NAME" \
+            --description "AMI built from successful Dev deploy (SHA: ${GITHUB_SHA})" \
+            --no-reboot \
+            --query 'ImageId' \
+            --output text)
+            
+          if [ -z "$AMI_ID" ]; then
+            echo "Error: AMI creation failed."
+            exit 1
+          fi
+          
+          echo "AMI created with ID: $AMI_ID"
+          echo "::set-output name=ami_id::$AMI_ID"
+    outputs:
+      new_ami_id: ${{ steps.create_ami.outputs.ami_id }}
+
+
+  # --- 3. Deploy to Prod Environment using the new AMI ---
+  deploy-prod:
+    name: Deploy to Prod
+    needs: create-ami-and-promote # Wait for AMI creation
+    if: success() && github.ref == 'refs/heads/dev' # Deploy Prod only after successful Dev & AMI creation
+    runs-on: ubuntu-latest
+    env:
+      AWS_REGION: ${{ secrets.AWS_REGION }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # Step 1: Deploy PROD Stack using the new AMI ID
+      - name: Deploy PROD Stack with New AMI
+        id: cfn_deploy_prod
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: Demo-App-Prod-Stack
+          template: infrastructure/template.yaml
+          # Use the AMI ID from the previous job's output
+          parameter-overrides: |
+            EnvironmentName=Prod,
+            KeyName=${{ secrets.EC2_KEY_NAME }},
+            LatestAMIId=${{ needs.create-ami-and-promote.outputs.new_ami_id }}
+          capabilities: CAPABILITY_NAMED_IAM
+
+      # Step 2: Get Endpoint and Run Health Check
+      - name: Get Public IP and Run Health Check
+        run: |
+          # Retrieve the InstancePublicIP output from the Prod stack
+          PUBLIC_IP=$(aws cloudformation describe-stacks \
+            --stack-name Demo-App-Prod-Stack \
+            --query "Stacks[0].Outputs[?OutputKey=='InstancePublicIP'].OutputValue" \
+            --output text)
+            
+          APP_ENDPOINT="http://${PUBLIC_IP}:3000/health-check"
+          echo "Running health check on $APP_ENDPOINT"
+          
+          # Wait a few seconds for the instance to initialize and the app to start
+          sleep 60 
+          
+          response=$(curl -s -o /dev/null -w "%{http_code}" $APP_ENDPOINT)
+          
+          if [ "$response" != "200" ]; then
+            echo "Health check failed with status $response"
+            exit 1
+          else
+            echo "Health check passed! App is ready in Production."
+          fi
