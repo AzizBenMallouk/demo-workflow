@@ -127,7 +127,7 @@ Resources:
           APP_DIR="/home/ec2-user/app"
           
           # IMPORTANT: Replace YOUR_GITHUB_USER/YOUR_REPO.git with your actual public repo
-          git clone https://github.com/YOUR_GITHUB_USER/YOUR_REPO.git $APP_DIR 
+          git clone https://github.com/AzizBenMallouk/demo-workflow.git $APP_DIR 
           
           # Change ownership to the standard ec2-user
           chown -R ec2-user:ec2-user $APP_DIR
