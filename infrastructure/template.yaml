@@ -115,14 +115,32 @@ Resources:
       UserData:
         Fn::Base64: |
           #!/bin/bash
+          # 1. Ensure all system components are up-to-date
           yum update -y
+
+          # 2. Install Node.js, Git, and dependencies
           curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
+          # The previous step sets up the repo; we still need to run yum install
           yum install -y nodejs git
-          git clone https://github.com/YOUR_GITHUB_USER/YOUR_REPO.git /home/ec2-user/app
-          chown -R ec2-user:ec2-user /home/ec2-user/app
-          cd /home/ec2-user/app
-          npm install
-          nohup node index.js > /var/log/app.log 2>&1 &
+          
+          # 3. Clone and install the application
+          APP_DIR="/home/ec2-user/app"
+          
+          # IMPORTANT: Replace YOUR_GITHUB_USER/YOUR_REPO.git with your actual public repo
+          git clone https://github.com/YOUR_GITHUB_USER/YOUR_REPO.git $APP_DIR 
+          
+          # Change ownership to the standard ec2-user
+          chown -R ec2-user:ec2-user $APP_DIR
+          
+          # 4. Run app setup as the ec2-user
+          # Use 'su - ec2-user -c "..."' to switch user and run commands
+          su - ec2-user -c "
+            cd $APP_DIR
+            npm install
+            # Start the app using nohup
+            nohup node index.js > /var/log/app.log 2>&1 &
+          "
+          echo "Application setup complete."
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-App-Server
