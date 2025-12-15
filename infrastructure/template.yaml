@@ -1,42 +1,44 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Description: Multi-Environment EC2 Deployment Demo with Self-Contained VPC
 
-# --- Parameters Section ---
+# ---------------- PARAMETERS ----------------
 Parameters:
   EnvironmentName:
     Type: String
-    Description: Environment name (Dev or Prod)
-    AllowedValues: [Dev, Prod]
+    Description: Environment name
+    AllowedValues:
+      - Dev
+      - Prod
+
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
-    Description: Name of an existing EC2 KeyPair to enable SSH access. # Required!
+    Description: Existing EC2 KeyPair name (required)
+
   LatestAMIId:
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2 # Base AMI for Dev
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
 
-# --- Conditions Section ---
+# ---------------- CONDITIONS ----------------
 Conditions:
-  IsProduction: !Equals [!Ref EnvironmentName, "Prod"]
-  EnableMonitoring: !If [IsProduction, "true", "false"]
+  IsProduction: !Equals [!Ref EnvironmentName, Prod]
 
-# --- Resources Section ---
+# ---------------- RESOURCES ----------------
 Resources:
-  # --- 1. Networking (New VPC for the stack) ---
+
+  # -------- VPC --------
   VPC:
     Type: AWS::EC2::VPC
     Properties:
       CidrBlock: 10.0.0.0/16
-      EnableDnsSupport: 'true'
-      EnableDnsHostnames: 'true'
-      # ✅ FIX: Tags moved inside Properties
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-VPC
-          
+
   InternetGateway:
     Type: AWS::EC2::InternetGateway
-    Properties: # ✅ FIX: Added Properties block
-      # ✅ FIX: Tags moved inside Properties
+    Properties:
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-IGW
@@ -47,25 +49,25 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
+  # -------- SUBNET --------
   PublicSubnet:
     Type: AWS::EC2::Subnet
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.1.0/24
-      MapPublicIpOnLaunch: 'true'
-      # ✅ FIX: Tags already inside Properties (this one was already correct)
+      MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-PublicSubnet
 
+  # -------- ROUTING --------
   RouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
-      # ✅ FIX: Tags already inside Properties (this one was already correct)
       Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-RouteTable
+          Value: !Sub ${EnvironmentName}-RT
 
   InternetRoute:
     Type: AWS::EC2::Route
@@ -75,52 +77,48 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
-  SubnetRouteTableAssociation:
+  SubnetRouteAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
       SubnetId: !Ref PublicSubnet
       RouteTableId: !Ref RouteTable
 
-  # --- 2. Security Group ---
+  # -------- SECURITY GROUP --------
   InstanceSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupDescription: !Sub Security group for ${EnvironmentName} app
-      VpcId: !Ref VPC # References new VPC
+      GroupDescription: !Sub ${EnvironmentName} EC2 security group
+      VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
-          FromPort: '22'
-          ToPort: '22'
+          FromPort: 22
+          ToPort: 22
           CidrIp: 0.0.0.0/0
         - IpProtocol: tcp
-          FromPort: '3000'
-          ToPort: '3000'
+          FromPort: 3000
+          ToPort: 3000
           CidrIp: 0.0.0.0/0
-      # Security Groups require Tags to be inside Properties (this one was already correct)
-      Tags: 
+      Tags:
         - Key: Name
-          Value: !Sub ${EnvironmentName}-SG # Added a Name tag for clarity
+          Value: !Sub ${EnvironmentName}-SG
 
-  # --- 3. EC2 Instance ---
+  # -------- EC2 INSTANCE --------
   EC2Instance:
     Type: AWS::EC2::Instance
     Properties:
-      ImageId: !Ref LatestAMIId # Uses base AMI for Dev, or the AMI ID passed by Prod
-      InstanceType: !If [IsProduction, t3.medium, t2.micro] # Conditional Instance Type
-      KeyName: !Ref KeyName # MANDATORY: Ensure your KeyPair exists
-      NetworkInterfaces:
-        - AssociatePublicIpAddress: 'true'
-          DeviceIndex: '0'
-          SubnetId: !Ref PublicSubnet # References new Subnet
-          GroupSet:
-            - !Ref InstanceSecurityGroup
+      ImageId: !Ref LatestAMIId
+      InstanceType: !If [IsProduction, t3.medium, t2.micro]
+      KeyName: !Ref KeyName
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref InstanceSecurityGroup
       UserData:
         Fn::Base64: |
           #!/bin/bash
           yum update -y
           curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
           yum install -y nodejs git
-          git clone https://github.com/YOUR_GITHUB_USER/YOUR_REPO.git /home/ec2-user/app # IMPORTANT: CHANGE THIS
+          git clone https://github.com/YOUR_GITHUB_USER/YOUR_REPO.git /home/ec2-user/app
           chown -R ec2-user:ec2-user /home/ec2-user/app
           cd /home/ec2-user/app
           npm install
@@ -129,35 +127,32 @@ Resources:
         - Key: Name
           Value: !Sub ${EnvironmentName}-App-Server
 
-  # --- 4. CloudWatch Alarm (Conditional Monitoring) ---
+  # -------- CLOUDWATCH ALARM (PROD ONLY) --------
   HighCPUAlarm:
     Type: AWS::CloudWatch::Alarm
     Condition: IsProduction
     Properties:
-      AlarmName: !Sub ${EnvironmentName}-High-CPU-Alarm
-      ComparisonOperator: GreaterThanThreshold
-      EvaluationPeriods: 2
-      MetricName: CPUUtilization
+      AlarmName: !Sub ${EnvironmentName}-HighCPU
       Namespace: AWS/EC2
-      Period: 300
+      MetricName: CPUUtilization
       Statistic: Average
-      Threshold: '80'
-      ActionsEnabled: 'true'
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 80
+      ComparisonOperator: GreaterThanThreshold
+      ActionsEnabled: true
       AlarmActions:
-        - arn:aws:sns:REGION:ACCOUNT_ID:AlarmTopic # IMPORTANT: CHANGE THIS
+        - arn:aws:sns:REGION:ACCOUNT_ID:AlarmTopic
       Dimensions:
         - Name: InstanceId
           Value: !Ref EC2Instance
 
-# --- Outputs Section ---
+# ---------------- OUTPUTS ----------------
 Outputs:
   InstanceId:
-    Description: The ID of the EC2 Instance
+    Description: EC2 Instance ID
     Value: !Ref EC2Instance
-    Export:
-      Name: !Sub ${EnvironmentName}AppInstanceId
+
   InstancePublicIP:
-    Description: Public IP address of the EC2 Instance
+    Description: Public IP address
     Value: !GetAtt EC2Instance.PublicIp
-    Export:
-      Name: !Sub ${EnvironmentName}AppPublicIP
