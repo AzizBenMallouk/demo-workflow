@@ -34,7 +34,7 @@ jobs:
           template: infrastructure/template.yaml
           parameter-overrides: |
             EnvironmentName=Dev,
-            KeyName=${{ secrets.EC2_KEY_NAME }} # IMPORTANT: Use a secret for your KeyPair name
+            KeyName=${{ secrets.EC2_KEY_NAME }}
           capabilities: CAPABILITY_NAMED_IAM
 
       - name: Get Dev Instance ID
