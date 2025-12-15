@@ -4,7 +4,7 @@ const app = express();
 const port = 3000;
 
 app.get('/', (req, res) => {
-  res.send('Bissmilllah!');
+  res.send('Bissmilllah, hala!');
 });
 
 // Health check endpoint for end-to-end test
