@@ -28,15 +28,18 @@ Resources:
       CidrBlock: 10.0.0.0/16
       EnableDnsSupport: 'true'
       EnableDnsHostnames: 'true'
+      # ✅ FIX: Tags moved inside Properties
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-VPC
           
   InternetGateway:
     Type: AWS::EC2::InternetGateway
-    Tags:
-      - Key: Name
-        Value: !Sub ${EnvironmentName}-IGW
+    Properties: # ✅ FIX: Added Properties block
+      # ✅ FIX: Tags moved inside Properties
+      Tags:
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-IGW
 
   AttachGateway:
     Type: AWS::EC2::VPCGatewayAttachment
@@ -50,6 +53,7 @@ Resources:
       VpcId: !Ref VPC
       CidrBlock: 10.0.1.0/24
       MapPublicIpOnLaunch: 'true'
+      # ✅ FIX: Tags already inside Properties (this one was already correct)
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-PublicSubnet
@@ -58,6 +62,7 @@ Resources:
     Type: AWS::EC2::RouteTable
     Properties:
       VpcId: !Ref VPC
+      # ✅ FIX: Tags already inside Properties (this one was already correct)
       Tags:
         - Key: Name
           Value: !Sub ${EnvironmentName}-RouteTable
@@ -91,6 +96,10 @@ Resources:
           FromPort: '3000'
           ToPort: '3000'
           CidrIp: 0.0.0.0/0
+      # Security Groups require Tags to be inside Properties (this one was already correct)
+      Tags: 
+        - Key: Name
+          Value: !Sub ${EnvironmentName}-SG # Added a Name tag for clarity
 
   # --- 3. EC2 Instance ---
   EC2Instance:
@@ -98,14 +107,13 @@ Resources:
     Properties:
       ImageId: !Ref LatestAMIId # Uses base AMI for Dev, or the AMI ID passed by Prod
       InstanceType: !If [IsProduction, t3.medium, t2.micro] # Conditional Instance Type
-      KeyName: !Ref KeyName # MANDATORY to replace
+      KeyName: !Ref KeyName # MANDATORY: Ensure your KeyPair exists
       NetworkInterfaces:
         - AssociatePublicIpAddress: 'true'
           DeviceIndex: '0'
           SubnetId: !Ref PublicSubnet # References new Subnet
           GroupSet:
             - !Ref InstanceSecurityGroup
-      # Example UserData to install Node.js and run the app (Requires app/index.js in repo)
       UserData:
         Fn::Base64: |
           #!/bin/bash
